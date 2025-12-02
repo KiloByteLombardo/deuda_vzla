@@ -1,0 +1,322 @@
+"""
+API endpoints para el sistema de procesamiento de deuda Venezuela
+"""
+from flask import Flask, jsonify, request, send_file
+from flask_cors import CORS
+from google.cloud import bigquery
+from google.cloud import storage
+import os
+import tempfile
+from datetime import datetime
+from werkzeug.utils import secure_filename
+from src.venezuela import procesar_archivos
+
+app = Flask(__name__)
+# Configurar CORS para permitir todas las solicitudes
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+# Configurar logging para mostrar requests HTTP
+import logging
+
+# Configurar el logger de werkzeug para mostrar requests
+werkzeug_logger = logging.getLogger('werkzeug')
+werkzeug_logger.setLevel(logging.INFO)
+app.logger.setLevel(logging.INFO)
+
+
+def get_bigquery_client():
+    """Obtiene un cliente de BigQuery usando ADC (Application Default Credentials)"""
+    try:
+        client = bigquery.Client()
+        return client
+    except Exception as e:
+        print(f"✗ Error al crear cliente de BigQuery: {e}")
+        raise
+
+
+def get_storage_client():
+    """Obtiene un cliente de Cloud Storage usando ADC (Application Default Credentials)"""
+    try:
+        client = storage.Client()
+        return client
+    except Exception as e:
+        print(f"✗ Error al crear cliente de Cloud Storage: {e}")
+        raise
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    """
+    Endpoint de health check
+    """
+    print(f"Health check - {request.method} {request.path}")
+    return jsonify({
+        'status': 'healthy',
+        'service': 'deuda_vzla_api'
+    }), 200
+
+
+@app.route('/test/bigquery', methods=['GET'])
+def test_bigquery():
+    """
+    Endpoint para probar la conexión a BigQuery
+    """
+    print(f"Test BigQuery - {request.method} {request.path}")
+    try:
+        project_id = os.getenv('GCP_PROJECT_ID')
+        if not project_id:
+            print("✗ GCP_PROJECT_ID no está configurado")
+            return jsonify({
+                'status': 'error',
+                'message': 'GCP_PROJECT_ID no está configurado en las variables de entorno'
+            }), 500
+        
+        print(f"Probando conexión a BigQuery con proyecto: {project_id}")
+        client = get_bigquery_client()
+        
+        # Intentar listar datasets para verificar la conexión
+        datasets = list(client.list_datasets())
+        print(f"✓ Conexión a BigQuery exitosa. Datasets encontrados: {len(datasets)}")
+        
+        return jsonify({
+            'status': 'success',
+            'message': 'Conexión a BigQuery exitosa',
+            'project_id': project_id,
+            'datasets_count': len(datasets),
+            'datasets': [dataset.dataset_id for dataset in datasets[:10]]  # Primeros 10
+        }), 200
+        
+    except Exception as e:
+        print(f"✗ Error al conectar con BigQuery: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Error al conectar con BigQuery: {str(e)}'
+        }), 500
+
+
+@app.route('/test/storage', methods=['GET'])
+def test_storage():
+    """
+    Endpoint para probar la conexión a Cloud Storage
+    """
+    print(f"Test Storage - {request.method} {request.path}")
+    try:
+        bucket_name = os.getenv('GCS_BUCKET_NAME')
+        project_id = os.getenv('GCP_PROJECT_ID')
+        
+        print(f"Probando conexión a Cloud Storage")
+        client = get_storage_client()
+        
+        # Intentar listar buckets para verificar la conexión
+        buckets = list(client.list_buckets())
+        print(f"✓ Conexión a Cloud Storage exitosa. Buckets encontrados: {len(buckets)}")
+        
+        response = {
+            'status': 'success',
+            'message': 'Conexión a Cloud Storage exitosa',
+            'buckets_count': len(buckets),
+            'buckets': [bucket.name for bucket in buckets[:10]]  # Primeros 10
+        }
+        
+        if project_id:
+            response['project_id'] = project_id
+        if bucket_name:
+            response['configured_bucket'] = bucket_name
+            # Verificar si el bucket configurado existe
+            try:
+                bucket = client.bucket(bucket_name)
+                response['bucket_exists'] = bucket.exists()
+                print(f"Bucket configurado '{bucket_name}' existe: {response['bucket_exists']}")
+            except Exception as e:
+                response['bucket_check_error'] = str(e)
+                print(f"⚠ Error al verificar bucket: {e}")
+        
+        return jsonify(response), 200
+        
+    except Exception as e:
+        print(f"✗ Error al conectar con Cloud Storage: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Error al conectar con Cloud Storage: {str(e)}'
+        }), 500
+
+
+@app.route('/test/sheets', methods=['GET'])
+def test_sheets():
+    """
+    Endpoint para probar la conexión a Google Sheets
+    """
+    print(f"Test Sheets - {request.method} {request.path}")
+    try:
+        # Google Sheets se accede típicamente a través de la API de Google Sheets
+        # Para verificar la conexión, necesitaríamos usar gspread o google-api-python-client
+        # Por ahora, solo verificamos que las credenciales estén configuradas
+        
+        credentials_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+        service_account_email = os.getenv('GOOGLE_SHEETS_SERVICE_ACCOUNT_EMAIL')
+        spreadsheet_id = os.getenv('GOOGLE_SHEETS_SPREADSHEET_ID')
+        
+        print(f"Verificando configuración de Google Sheets...")
+        
+        if not credentials_path and not service_account_email:
+            print("⚠ Credenciales de Google Sheets no configuradas completamente")
+            return jsonify({
+                'status': 'warning',
+                'message': 'Credenciales de Google Sheets no configuradas completamente',
+                'note': 'Se requiere GOOGLE_APPLICATION_CREDENTIALS o GOOGLE_SHEETS_SERVICE_ACCOUNT_EMAIL'
+            }), 200
+        
+        print(f"✓ Configuración de Google Sheets detectada")
+        return jsonify({
+            'status': 'success',
+            'message': 'Configuración de Google Sheets detectada',
+            'has_credentials': bool(credentials_path),
+            'service_account_email': service_account_email if service_account_email else 'No configurado',
+            'spreadsheet_id': spreadsheet_id if spreadsheet_id else 'No configurado'
+        }), 200
+        
+    except Exception as e:
+        print(f"✗ Error al verificar Google Sheets: {e}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Error al verificar Google Sheets: {str(e)}'
+        }), 500
+
+
+@app.route('/generar-deuda', methods=['POST'])
+def generar_deuda():
+    """
+    Endpoint para generar el archivo de deuda procesado.
+    Recibe dos archivos Excel: Ordenes de Compra y Tasa.
+    
+    FormData:
+        - ordenes_compra: Archivo Excel de Ordenes de Compra
+        - tasa: Archivo Excel de Tasa
+    """
+    print(f"Generar Deuda - {request.method} {request.path}")
+    
+    # Verificar que se hayan enviado los archivos
+    if 'ordenes_compra' not in request.files:
+        print("✗ Error: No se encontró el archivo 'ordenes_compra'")
+        return jsonify({
+            'status': 'error',
+            'message': 'Falta el archivo de Ordenes de Compra. Use el campo "ordenes_compra"'
+        }), 400
+    
+    if 'tasa' not in request.files:
+        print("✗ Error: No se encontró el archivo 'tasa'")
+        return jsonify({
+            'status': 'error',
+            'message': 'Falta el archivo de Tasa. Use el campo "tasa"'
+        }), 400
+    
+    ordenes_file = request.files['ordenes_compra']
+    tasa_file = request.files['tasa']
+    
+    # Verificar que los archivos no estén vacíos
+    if ordenes_file.filename == '':
+        print("✗ Error: El archivo de Ordenes de Compra está vacío")
+        return jsonify({
+            'status': 'error',
+            'message': 'El archivo de Ordenes de Compra está vacío'
+        }), 400
+    
+    if tasa_file.filename == '':
+        print("✗ Error: El archivo de Tasa está vacío")
+        return jsonify({
+            'status': 'error',
+            'message': 'El archivo de Tasa está vacío'
+        }), 400
+    
+    # Crear directorio temporal para los archivos
+    temp_dir = tempfile.mkdtemp()
+    
+    try:
+        # Guardar archivos temporalmente
+        ordenes_filename = secure_filename(ordenes_file.filename) or 'ordenes_compra.xlsx'
+        tasa_filename = secure_filename(tasa_file.filename) or 'tasa.xlsx'
+        
+        ruta_ordenes = os.path.join(temp_dir, ordenes_filename)
+        ruta_tasa = os.path.join(temp_dir, tasa_filename)
+        
+        ordenes_file.save(ruta_ordenes)
+        tasa_file.save(ruta_tasa)
+        
+        print(f"Archivos guardados temporalmente:")
+        print(f"  Ordenes: {ruta_ordenes}")
+        print(f"  Tasa: {ruta_tasa}")
+        
+        # Generar nombre de archivo de salida con fecha
+        fecha_actual = datetime.now()
+        fecha_formato = f"{fecha_actual.day}_{fecha_actual.month}_{fecha_actual.year}"
+        nombre_archivo_salida = f"resultado_deuda_{fecha_formato}.xlsx"
+        ruta_salida = os.path.join(temp_dir, nombre_archivo_salida)
+        
+        # Procesar archivos
+        print("Iniciando procesamiento de archivos...")
+        df_ordenes, df_tasa = procesar_archivos(ruta_ordenes, ruta_tasa, ruta_salida)
+        
+        print(f"✓ Procesamiento completado. Filas procesadas: {len(df_ordenes)}")
+        
+        # Verificar que el archivo se haya creado
+        if not os.path.exists(ruta_salida):
+            print("✗ Error: El archivo de salida no se creó")
+            return jsonify({
+                'status': 'error',
+                'message': 'Error al generar el archivo de salida'
+            }), 500
+        
+        # Enviar el archivo como respuesta
+        print(f"Enviando archivo: {nombre_archivo_salida}")
+        return send_file(
+            ruta_salida,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=nombre_archivo_salida
+        )
+        
+    except Exception as e:
+        print(f"✗ Error al procesar archivos: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'status': 'error',
+            'message': f'Error al procesar los archivos: {str(e)}'
+        }), 500
+    
+    finally:
+        # Limpiar archivos temporales después de un delay
+        # (En producción, podrías usar un task en background)
+        try:
+            import time
+            time.sleep(1)  # Dar tiempo para que el archivo se envíe
+            # Limpiar archivos temporales
+            for file in os.listdir(temp_dir):
+                try:
+                    os.remove(os.path.join(temp_dir, file))
+                except:
+                    pass
+            os.rmdir(temp_dir)
+            print(f"✓ Archivos temporales eliminados")
+        except Exception as e:
+            print(f"⚠ Error al limpiar archivos temporales: {e}")
+
+
+# Middleware para imprimir cada request
+@app.after_request
+def log_request(response):
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{timestamp}] {request.method} {request.path} - {response.status_code}")
+    return response
+
+if __name__ == '__main__':
+    port = int(os.getenv('PORT', 8080))
+    print(f"🚀 Iniciando servidor Flask en puerto {port}")
+    print(f"📡 Endpoints disponibles:")
+    print(f"   - GET  /health")
+    print(f"   - GET  /test/bigquery")
+    print(f"   - GET  /test/storage")
+    print(f"   - GET  /test/sheets")
+    print(f"   - POST /generar-deuda")
+    app.run(host='0.0.0.0', port=port, debug=False)
+

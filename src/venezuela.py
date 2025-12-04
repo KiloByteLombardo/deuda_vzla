@@ -978,26 +978,39 @@ def leer_areas_desde_sheets(spreadsheet_id: str, credentials_path: Optional[str]
     
     try:
         # Obtener credenciales
+        # Prioridad 1: Archivo de credenciales proporcionado explícitamente (desarrollo local)
         if credentials_path and os.path.exists(credentials_path):
+            print(f"  Usando archivo de credenciales proporcionado: {credentials_path}")
             creds = Credentials.from_service_account_file(
                 credentials_path,
                 scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
             )
+            gc = gspread.authorize(creds)
         else:
-            # Intentar usar credenciales desde variable de entorno
+            # Prioridad 2: Variable de entorno GOOGLE_APPLICATION_CREDENTIALS (desarrollo local)
             creds_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
             if creds_path and os.path.exists(creds_path):
+                print(f"  Usando GOOGLE_APPLICATION_CREDENTIALS desde: {creds_path}")
                 creds = Credentials.from_service_account_file(
                     creds_path,
                     scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
                 )
+                gc = gspread.authorize(creds)
             else:
-                print("✗ Error: No se encontraron credenciales de Google Sheets")
-                print("  Configura GOOGLE_APPLICATION_CREDENTIALS o proporciona credentials_path")
-                return {}
+                # Prioridad 3: Application Default Credentials (Cloud Run)
+                print("  Usando Application Default Credentials (ADC) - Cloud Run")
+                try:
+                    from google.auth import default
+                    creds, project = default(scopes=['https://www.googleapis.com/auth/spreadsheets.readonly'])
+                    gc = gspread.authorize(creds)
+                    print("  ✓ Credenciales ADC obtenidas exitosamente")
+                except Exception as adc_error:
+                    print(f"✗ Error: No se pudieron obtener credenciales de Google Sheets")
+                    print(f"  Error ADC: {adc_error}")
+                    print("  En Cloud Run, asegúrate de que el service account tenga acceso al Google Sheet")
+                    return {}
         
         # Conectar con Google Sheets
-        gc = gspread.authorize(creds)
         sheet = gc.open_by_key(spreadsheet_id)
         
         # Obtener la primera hoja (o puedes especificar el nombre)
@@ -1162,7 +1175,15 @@ def procesar_archivos(
     df_ordenes_con_tasa = agregar_columna_tasa(df_ordenes_con_ano_fiscal, df_tasa)
     
     # Agregar columna AREA desde Google Sheets
-    df_ordenes_con_area = agregar_columna_area(df_ordenes_con_tasa, "15JAM-L4wTWSAs1wUrHFWBpYmgTDTGys2m36CcaI4UjU", "D:/Users/andres.moreno/Documents/Deuda Farmatodo VZLA/deuda_vzla/credentials.json")
+    # En Cloud Run, no se necesita credentials_path (usa ADC automáticamente)
+    # En desarrollo local, se puede pasar credentials_path si es necesario
+    credentials_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+    spreadsheet_id = os.getenv('GOOGLE_SHEETS_SPREADSHEET_ID')
+    df_ordenes_con_area = agregar_columna_area(
+        df_ordenes_con_tasa, 
+        spreadsheet_id, 
+        credentials_path if credentials_path and os.path.exists(credentials_path) else None
+    )
     
     # Agregar columnas MONTO OC y MONTO OC USD
     df_ordenes_con_montos = agregar_montos_oc(df_ordenes_con_area)
